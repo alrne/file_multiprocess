@@ -2,6 +2,10 @@
 
 多进程文件处理工具类
 
+
+
+python3.6
+
 遇到一个业务，对一个文件处理的速度进行性能调优
 虽然是个菜鸟，但果断想到切割文件，线程池分块处理再合并的思路。
 做出了多线程进行测试时才发现多线程（python）去做计算密集型的任务速度还不如单线程的快，由此诞生了这个多进程工具类。
@@ -21,7 +25,6 @@ project mean
 ```shell
 file_multiprocess
 -- file_multiprocess.py
--- futures_pool.py
 -- multiprocess_pool.py
 -- utils\
   -- cmd_utils.py
@@ -31,7 +34,7 @@ file_multiprocess
 介绍（introduce） 
 file_multiprocess.py
 可独立使用的多进程文件处理，基于Linux实现
-can work  to process file,support linux
+can work  to process file,support linux & windows
 
 multiprocess_pool.py
 进程池，封装模块multiprocess.Pool , 分配任务出现失败时,进程池关闭并返回

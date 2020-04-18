@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+from functools import wraps
 
 
 def get_process_msg(std_msg):
@@ -48,3 +49,16 @@ def exc_redirect(code):
                 return code
         return __handler
     return _handler
+
+
+def file_encoding_validate(filename, encoding='utf8'):
+    """文件编码验证"""
+    with open(filename, 'rb')as fr:
+        for line in fr:
+            try:
+                line.decode(encoding)
+            except UnicodeDecodeError:
+                return False
+                # raise TypeError("file: {} encoding!={}"
+                #                 .format(filename, encoding))
+    return True

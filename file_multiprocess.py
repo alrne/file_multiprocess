@@ -1,12 +1,10 @@
-# coding=utf8
-import platform
 import shutil
 import time
 import multiprocessing as mp
 import os
 import logging
-import queue
 
+import multiprocess_pool
 from utils import cmd_utils
 
 
@@ -16,7 +14,7 @@ class FileMultiprocess(object):
                  worker_size=None,
                  tmp_dir="/tmp/",
                  overwrite=True,
-                 logger=logging):
+                 logger=logging.getLogger()):
         """
         文件多线程处理
         work on linux
@@ -27,10 +25,8 @@ class FileMultiprocess(object):
         :param worker_size: 并行最大进程数
         :param tmp_dir 文件缓存路径 default=/tmp/
         :param overwrite 覆盖输出文件
-        :param logger: 日志模块
+        :param logger: 日志
         """
-        if platform.system() != "Linux":
-            raise TypeError("{} 仅支持Linux平台".format(self.__class__.__name__))
         self.log = logger
         output_dir, filename = os.path.split(output_file)
         if not os.path.isdir(output_dir):
@@ -44,6 +40,9 @@ class FileMultiprocess(object):
         if not os.path.isfile(input_file):
             raise ValueError("输入文件 {} 不存在"
                              .format(input_file))
+        if not cmd_utils.file_encoding_validate(input_file):
+            raise ValueError("输入文件 {} 不是utf8编码"
+                             .format(input_file))
         if not getattr(line_call, "__call__"):
             raise ValueError("参数异常，接受func 但是传递了 {}"
                              .format(type(line_call)))
@@ -54,80 +53,67 @@ class FileMultiprocess(object):
         self._tmp_dir = os.path.join(tmp_dir, filename)
         if os.path.isdir(self._tmp_dir):
             raise ValueError("目录 {} 已存在" .format(self._tmp_dir))
-        os.makedirs(self._tmp_dir)
         self.input_file = input_file
         self.output_dir = output_dir
         self.filename = filename
         self.overwrite = overwrite
+        self._result_suffix = ".result"
         self._line_call = line_call
         self._line_size = split_line_size
         self._worker_size = worker_size or mp.cpu_count()
-        self._result_suffix = ".result"
-        self._file_queue = mp.Queue()
-        self._part_tuple = None
-        self._event = mp.Event()
-        self._processors = []
         self.return_code = None
         self._is_shutdown = False
+        self.err_msg = None
+
+    @staticmethod
+    def file_part_handler(func, suffix, filename):
+        """处理文件的主方法"""
+        if not os.path.isfile(filename):
+            raise OSError("文件块 {} 不存在".format(filename))
+        fr = open(filename, 'r')
+        fw = open(filename + suffix, 'w')
+        try:
+            for line in fr:
+                fw.write(func(line))
+        finally:
+            fw.close()
+            fr.close()
+        return True
 
     def _shutdown(self):
         """回收 1.硬盘空间 2.内存空间"""
         if self._is_shutdown is True:
             return
         self._is_shutdown = True
-        self._event.set()
         self.log.info("回收目录 {}".format(self._tmp_dir))
         shutil.rmtree(self._tmp_dir, ignore_errors=True)
-        pids = []
-        for p in self._processors:
-            try:
-                p.terminate()
-                pids.append(p.pid)
-            except OSError:
-                pass
-        self.log.info("回收进程 {}".format(pids))
 
     def _split_input_file(self):
-        cmd_utils.get_process_by_cmd("mkdir -p {}".format(self._tmp_dir), logger=self.log)
-        cmd_utils.get_process_by_cmd("split -l {} -a 6 {} {}/part"
-                                     .format(self._line_size, self.input_file, self._tmp_dir),
-                                     logger=self.log)
-        part_list = cmd_utils.get_files_by_path(self._tmp_dir)
-        part_list.sort()
-        [self._file_queue.put(f) for f in part_list]
-        self._part_tuple = tuple(part_list)
-        self.log.info("文件 {} 切割成功, 分割块为 {} 个".format(self.input_file, len(self._part_tuple)))
-
-    def main(self):
-        """处理文件的主方法"""
-        cur_info = "进程 pg-{} p-{}" .format(os.getpgid(os.getpid()), os.getpid())
-        self.log.info("{} 开始工作" .format(cur_info))
-        while True:
-            try:
-                file_name = self._file_queue.get(timeout=10)
-            except queue.Empty:
-                self.log.info("{} 结束工作" .format(cur_info))
-                break
-            if not os.path.isfile(file_name):
-                self._handle_err(OSError("文件块 {} 不存在".format(file_name)))
-                continue
-            fr = open(file_name, 'r')
-            fw = open(file_name + self._result_suffix, 'w')
-            try:
-                for line in fr:
-                    try:
-                        fw.write(self._line_call(line))
-                    except Exception as e:
-                        self._handle_err(e)
-            finally:
-                fw.close()
-                fr.close()
+        os.makedirs(self._tmp_dir+"/")
+        i = 0
+        self._file_list = []
+        with open(self.input_file, "r", encoding='utf8')as fr:
+            cur_lines = 0
+            fw = open(os.path.join(self._tmp_dir, str(i)), "w", encoding='utf8')
+            self._file_list.append(fw.name)
+            for line in fr:
+                fw.write(line)
+                cur_lines += 1
+                if cur_lines == self._line_size:
+                    cur_lines = 0
+                    fw.close()
+                    i += 1
+                    fw = open(os.path.join(self._tmp_dir, str(i)), "w", encoding='utf8')
+                    self._file_list.append(fw.name)
+            fw.close()
+        self.log.info("文件 {} 切割成功, 分割块为 {} 个".format(self.input_file, len(self._file_list)))
+        return True
 
     def _handle_err(self, e):
         self.log.error("发生异常，任务终止")
         self.log.exception(e)
-        self._shutdown()
         self.return_code = False
+        self._shutdown()
         raise e
 
     def _process_file(self):
@@ -135,19 +121,17 @@ class FileMultiprocess(object):
         创建子进程，处理文件块，按序合并产出输出文件
         :return: execute result: <type>boolean
         """
-        if self._file_queue.qsize() < self._worker_size:
-            self._worker_size = self._file_queue.qsize()
+        if len(self._file_list) < self._worker_size:
+            self._worker_size = len(self._file_list)
         self.log.info("进程数：{}" .format(self._worker_size))
-        for i in range(self._worker_size):
-            p = mp.Process(target=self.main)
-            p.start()
-            self._processors.append(p)
-        for p in self._processors:
-            p.join()
-        if self._event.is_set():
-            self.log.warning("任务执行中止，无需处理业务数据")
-            self.return_code = False
-            return False
+        process_args = [(self._line_call, self._result_suffix, i)
+                        for i in self._file_list]
+        with multiprocess_pool.MultiprocessPool(size=self._worker_size,
+                                                target=self.file_part_handler,
+                                                iterable=process_args,
+                                                logger=self.log) as pool:
+            self.return_code = pool.run()
+            self.err_msg = pool.err_msg
         return self._merge_output_file()
 
     def run(self):
@@ -160,22 +144,27 @@ class FileMultiprocess(object):
 
     def _merge_output_file(self):
         """合并输出文件"""
+        if not self.return_code:
+            self.log.info("文件处理失败，无需合并")
+            return self.return_code
         output_file = os.path.join(self.output_dir, self.filename)
         if os.path.isfile(output_file) and self.overwrite:
             self.log.info("输出文件：{} 将被覆盖" .format(output_file))
-            os.remove(output_file)
         # 停顿1s 避免IO过慢时文件检查不通过
         time.sleep(1)
-        for part in self._part_tuple:
-            filename = part+self._result_suffix
-            if not os.path.isfile(filename):
-                self._handle_err(OSError("任务合并时，发现文件块 {} 不存在".format(filename)))
-            cmd_utils.get_process_by_cmd("cat {} >> {}".format(filename, output_file))
+        with open(output_file, "w")as fw:
+            for part in self._file_list:
+                filename = part+self._result_suffix
+                if not os.path.isfile(filename):
+                    self._handle_err(OSError("任务合并时，发现文件块 {} 不存在".format(filename)))
+                with open(filename, "r")as fr:
+                    shutil.copyfileobj(fsrc=fr, fdst=fw)
         return True
 
     def __del__(self):
         """对象被销毁时执行"""
-        if self.return_code is None:
+        return_code = getattr(self, "return_code", None)
+        if return_code is None:
             self.return_code = False
         self._shutdown()
 

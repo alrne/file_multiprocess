@@ -1,15 +1,14 @@
-# coding=utf8
 import multiprocessing as mp
+import traceback
 from typing import Iterable
 import logging
-import threading
 
 from tqdm import tqdm
 
 from utils import tqdm_utils
 
 
-class MultiprocessPool(threading.Thread):
+class MultiprocessPool(object):
     def __init__(self, size, target, iterable, logger=logging.getLogger(), p_bar=False):
         """
         进程池
@@ -29,47 +28,57 @@ class MultiprocessPool(threading.Thread):
         self.iterable = iterable
         self.log = logger
         self.return_code = None
-        self.exc_msg = None
         if p_bar:
             self.tqdm_obj = tqdm(iterable=iterable,
                                  file=tqdm_utils.TqdmRedirectLog(logger))
+
+            self.tqdm_lock = mp.Lock()
         else:
             self.tqdm_obj = None
-        self.handler_lock = threading.Lock()
+        self.pool = None
+        self.err_msg = None
+        self.trace_msg = None
 
     def _callback(self, res):
-        if not self.tqdm_obj:
+        if self.tqdm_obj is None:
             return
-        with self.handler_lock:
+        with self.tqdm_lock:
             self.tqdm_obj.update()
 
-    def _err_callback(self, pool_):
-        def _callback(exc):
-            self.set_exc(exc)
-            pool_.terminate()
-            self.return_code = False
-        return _callback
+    def _err_callback(self, exc):
+        import traceback
+        traceback.print_exc()
+        self.set_exc(exc)
+        self.pool.terminate()
+        self.return_code = False
 
     def run(self):
         with mp.Pool(self.size) as pool:
-            for args in self.iterable:
-                if not isinstance(args, tuple):
-                    args = (args, )
-                pool.apply_async(self.target, args=args,
-                                 callback=self._callback,
-                                 error_callback=self._err_callback(pool))
-            pool.close()
-            pool.join()
+            self.pool = pool
+            self.pool.starmap_async(self.target,
+                                    self.iterable,
+                                    callback=self._callback,
+                                    error_callback=self._err_callback)
+            self.pool.close()
+            self.pool.join()
         if self.return_code is None:
             self.return_code = True
         return self.return_code
 
     def set_exc(self, exc):
         """将异常转为文本"""
-        exc_msg = ""
+        err_msg = ""
         if isinstance(exc, BaseException):
-            exc_msg += exc.__class__.__name__ + ": "
-        self.exc_msg = exc_msg + str(exc)
+            err_msg += exc.__class__.__name__ + ": "
+        self.err_msg = err_msg + str(exc)
+        self.trace_msg = traceback.format_exc()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if getattr(getattr(self, "pool"), "terminate"):
+            self.pool.terminate()
 
     def __repr__(self):
         return "<{} {}>" .format(self.__class__.__name__, self.target)
