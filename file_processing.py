@@ -4,11 +4,11 @@ import multiprocessing as mp
 import os
 import logging
 
-import multiprocess_pool
+import process_pool
 from utils import cmd_utils
 
 
-class FileMultiprocess(object):
+class FileProcessing(object):
     def __init__(self, input_file, output_file, line_call,
                  split_line_size=10 * 1000,
                  worker_size=None,
@@ -17,7 +17,6 @@ class FileMultiprocess(object):
                  logger=logging.getLogger()):
         """
         文件多线程处理
-        work on linux
         :param input_file: 输入文件
         :param output_file: 输出文件
         :param line_call: 行处理函数
@@ -116,31 +115,30 @@ class FileMultiprocess(object):
         self._shutdown()
         raise e
 
-    def _process_file(self):
-        """
-        创建子进程，处理文件块，按序合并产出输出文件
-        :return: execute result: <type>boolean
-        """
+    def _finished_tasks(self):
         if len(self._file_list) < self._worker_size:
             self._worker_size = len(self._file_list)
         self.log.info("进程数：{}" .format(self._worker_size))
         process_args = [(self._line_call, self._result_suffix, i)
                         for i in self._file_list]
-        with multiprocess_pool.MultiprocessPool(size=self._worker_size,
-                                                target=self.file_part_handler,
-                                                iterable=process_args,
-                                                logger=self.log) as pool:
+        with process_pool.ProcessPool(size=self._worker_size,
+                                      target=self.file_part_handler,
+                                      iterable=process_args,
+                                      logger=self.log,
+                                      p_bar=True) as pool:
             self.return_code = pool.run()
             self.err_msg = pool.err_msg
-        return self._merge_output_file()
+        self._merge_output_file()
 
+    @cmd_utils.time_count
     def run(self):
         """任务执行入口"""
         st = time.time()
         self._split_input_file()
-        self._process_file()
+        self._finished_tasks()
         self.log.info("数据处理共花费 {} 秒".format(round(time.time() - st, 2)))
         self._shutdown()
+        return self.return_code
 
     def _merge_output_file(self):
         """合并输出文件"""
@@ -159,7 +157,6 @@ class FileMultiprocess(object):
                     self._handle_err(OSError("任务合并时，发现文件块 {} 不存在".format(filename)))
                 with open(filename, "r")as fr:
                     shutil.copyfileobj(fsrc=fr, fdst=fw)
-        return True
 
     def __del__(self):
         """对象被销毁时执行"""

@@ -8,11 +8,12 @@ from tqdm import tqdm
 from utils import tqdm_utils
 
 
-class MultiprocessPool(object):
+class ProcessPool(object):
     def __init__(self, size, target, iterable, logger=logging.getLogger(), p_bar=False):
         """
         进程池
-        :param size: 并发进程数
+        发生异常即终止全部任务
+        :param size: 并行进程数
         :param target: 处理函数
         :param iterable: 任务
         :param logger: 日志打印
@@ -46,8 +47,6 @@ class MultiprocessPool(object):
             self.tqdm_obj.update()
 
     def _err_callback(self, exc):
-        import traceback
-        traceback.print_exc()
         self.set_exc(exc)
         self.pool.terminate()
         self.return_code = False
@@ -55,10 +54,11 @@ class MultiprocessPool(object):
     def run(self):
         with mp.Pool(self.size) as pool:
             self.pool = pool
-            self.pool.starmap_async(self.target,
-                                    self.iterable,
-                                    callback=self._callback,
-                                    error_callback=self._err_callback)
+            for args in self.iterable:
+                self.pool.apply_async(func=self.target,
+                                      args=args,
+                                      callback=self._callback,
+                                      error_callback=self._err_callback)
             self.pool.close()
             self.pool.join()
         if self.return_code is None:
@@ -77,9 +77,8 @@ class MultiprocessPool(object):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if getattr(getattr(self, "pool"), "terminate"):
+        if getattr(self, "pool"):
             self.pool.terminate()
 
     def __repr__(self):
         return "<{} {}>" .format(self.__class__.__name__, self.target)
-

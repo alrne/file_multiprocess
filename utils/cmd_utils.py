@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import time
 from functools import wraps
 
 
@@ -62,3 +63,15 @@ def file_encoding_validate(filename, encoding='utf8'):
                 # raise TypeError("file: {} encoding!={}"
                 #                 .format(filename, encoding))
     return True
+
+
+def time_count(func):
+    @wraps(func)
+    def count(*args, **kwargs):
+        t = time.time()
+        try:
+            res = func(*args, **kwargs)
+        finally:
+            cnt = round(time.time() - t, 2)
+        return res, cnt
+    return count
